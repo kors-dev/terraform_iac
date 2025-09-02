@@ -1,94 +1,207 @@
-# terraform_iac
+# Terraform IaC for GKE (GCP Cloud Shell Walkthrough)
 
-# Вкажи свій проект і регіон (приклад: europe-central2 — Варшава)
+This guide walks you through preparing an infrastructure repository and deploying a Google Kubernetes Engine (GKE) cluster with Terraform. It also covers cost estimation with Infracost and migrating Terraform state to Google Cloud Storage (GCS).
+
+> **Scope:** Minimal working example for a lab/sandbox. Adjust values (machine types, node counts, regions) to your real needs.
+
+---
+
+## 1) Configure gcloud
+
+Set your **project** and **region** (example region: `europe-central2` — Warsaw):
+
+```bash
 gcloud config set project ak-gke-lab-euc2
 gcloud config set compute/region europe-central2
+```
 
-# Увімкнути потрібні API
+Enable required APIs:
+
+```bash
 gcloud services enable container.googleapis.com compute.googleapis.com
+```
 
-# Перевірити, що terraform встановлений
+Verify Terraform is available:
+
+```bash
 terraform -v
+```
 
-# У файлі main.tf додайте наступний блок коду для створення коду на базі модуля tf-google-gke-cluster:
+---
+
+## 2) Repository Files
+
+Create a Terraform working directory (e.g., `terraform_iac/`) and add the following files.
+
+### `main.tf`
+
+> Replace `<YOUR-REPO>` with your GitHub repository that hosts the reusable GKE module.
+
+```hcl
 module "gke_cluster" {
-  source         = "github.com/<ВАШ-РЕПОЗИТОРІЙ>/tf-google-gke-cluster"
+  source         = "github.com/<YOUR-REPO>/tf-google-gke-cluster"
   GOOGLE_REGION  = var.GOOGLE_REGION
   GOOGLE_PROJECT = var.GOOGLE_PROJECT
-  GKE_NUM_NODES  = 2
+  GKE_NUM_NODES  = var.GKE_NUM_NODES
 }
+```
 
-# variables.tf
+### `variables.tf`
+
+> **Important:** Use a **region** (e.g., `europe-central2`), not a zone (`us-central1-c` is a zone).
+
+```hcl
 variable "GOOGLE_PROJECT" {
   type        = string
-  description = "gcp project name"
+  description = "GCP project ID"
 }
 
 variable "GOOGLE_REGION" {
   type        = string
-  default     = "us-central1-c"
-  description = "gcp region for GKE"
+  default     = "europe-central2" # <- use a REGION here
+  description = "GCP region for GKE"
 }
 
 variable "GKE_NUM_NODES" {
   type        = number
-  description = "default number of gke nodes"
+  description = "Default number of GKE nodes"
+  default     = 2
 }
+```
 
+### `vars.tfvars`
 
-# vars.tfvars
+```hcl
 GOOGLE_REGION  = "europe-central2"
 GOOGLE_PROJECT = "<YOUR_GCP_PROJECT_ID>"
 GKE_NUM_NODES  = 2
+```
 
-# Ініціалізація, формат, валідація
+> Tip: For **regional** clusters, 2 nodes means 2 nodes **per zone**. If you hit SSD quota issues, try `GKE_NUM_NODES = 1` or switch to a **zonal** cluster in the module.
+
+---
+
+## 3) Initialize, Format, Validate
+
+```bash
 terraform init
 terraform fmt -recursive
 terraform validate
+```
 
-# Створити план
+---
+
+## 4) Create a Plan and Export JSON
+
+Generate the plan and save it to a file:
+```bash
 terraform plan -var-file=vars.tfvars -out=plan.out
+```
+
+Export plan to JSON (for tooling like Infracost):
+```bash
 terraform show -json plan.out > plan.json
+```
 
-# Infracost установка, налаштування і запуск
+(Optional) Pretty print the JSON in Cloud Shell:
+```bash
+jq '.' plan.json > tmp.json && mv tmp.json plan.json
+```
+
+---
+
+## 5) Infracost (Install, Configure, Run)
+
+Install Infracost:
+```bash
 curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+```
 
+Configure API key:
+```bash
 infracost configure set api_key <YOUR_INFRACOST_API_KEY>
+```
 
+Run the breakdown:
+```bash
 infracost breakdown --path plan.json --format table
+```
 
-![alt text](image-1.png)
+Example screenshots you can place in your repo (optional):
+```
+![Infracost](image-1.png)
+```
 
-# Розгортання інфраструктури
+---
 
+## 6) Deploy the Infrastructure
+
+Apply the plan using your tfvars:
+```bash
 terraform apply -var-file=vars.tfvars
+```
 
-# Після успішного apply подивись стан/виходи:
+> **Note:** Creating a GKE cluster usually takes ~8–15 minutes for Standard clusters (regional can take longer than zonal).
 
- terraform show
+---
 
- ![alt text](image.png)
+## 7) Inspect State and Outputs
 
+```bash
+terraform show
+```
 
-# Знищення ресурсів після перевірки
+Optional screenshot placeholder:
+```
+![Terraform Show](image.png)
+```
+
+---
+
+## 8) Destroy (Clean Up After Testing)
+
+```bash
 terraform destroy -var-file=vars.tfvars
+```
 
-# У Google Cloud Console перейдіть до розділу Cloud Storage і створіть новий bucket для зберігання вашого стану Terraform.
+> If you see an error about `deletion_protection = true`, first update the cluster resource via the module to set it to `false`, apply, then destroy. Alternatively, delete the cluster with `gcloud` and remove it from Terraform state (advanced users).
 
-# додати бакет до main.tf
+---
+
+## 9) Migrate State to Google Cloud Storage (Remote Backend)
+
+Create a new bucket (via Console or CLI) to store Terraform state.
+
+Add this **backend** block at the top of your root `main.tf` (not in the module):
+
+```hcl
 terraform {
   backend "gcs" {
     bucket = "your-bucket-name"
     prefix = "terraform/state"
   }
 }
+```
 
-# виконати ще раз ініціалізацію і підтвердити перенесення стану
+Re-initialize to migrate state:
+```bash
 terraform init
+```
 
-#Перевір, що state тепер у GCS
-# Повинні з’явитись об’єкти типу .../default.tfstates/...
+Verify that state has been uploaded to GCS:
+```bash
 gsutil ls -r gs://your-bucket-name/terraform/state
-# Локальний state-файл terraform.tfstate більше не потрібен
+```
 
+> The local `terraform.tfstate` file is no longer needed once the migration completes successfully.
+
+---
+
+## 10) Git Hygiene & Secrets
+
+- Do **not** commit `*.tfstate`, `*.tfstate.backup`, `plan.out`, or sensitive `*.tfvars` to a public repo.
+- Consider committing `.terraform.lock.hcl` to lock provider versions.
+- Store secrets in Secret Manager or pass via environment variables; do not hardcode credentials in `.tf` or `.tfvars`.
+
+---
 
